@@ -1,0 +1,6 @@
+{
+  "name": "SHIELD4 Simulation Dashboard",
+  "description": "Enterprise cybersecurity dashboard simulation with IndexedDB-based local persistence, real-time ticket generation, and a glassmorphism dark-mode aesthetic.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <title>Letter Storm — JARIF</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      background: #000;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+      font-family: 'Courier New', monospace;
+    }
+
+    canvas {
+      display: block;
+      /* crisp edges */
+      image-rendering: crisp-edges;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+
+  <script>
+    (function(){
+      // --- strict mode, clean global state ---
+      const canvas = document.getElementById('canvas');
+      const ctx = canvas.getContext('2d');
+
+      // resize handling
+      function resizeCanvas() {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+        if (typeof initTargetPositions === 'function') {
+          initTargetPositions();
+        }
+      }
+      window.addEventListener('resize', () => {
+        resizeCanvas();
+        // reinitialize target glyph map after resize
+        if (typeof rebuildTargetPositions === 'function') {
+          rebuildTargetPositions();
+        } else {
+          // fallback: re-run full init logic for target positions
+          if (window._targetPositionsRebuild) window._targetPositionsRebuild();
+        }
+      });
+
+      // ---------- CONFIGURATION ----------
+      // REPLACED "CLAUDE" WITH "JARIF" as requested
+      const WORD          = 'JARIF';     // ★ the word to appear instead of "CLAUDE"
+      const NUM_PARTICLES = 480;         // slightly more particles for richer "JARIF" formation
+      const ALPHABET      = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%&*?+-=';
+      const FONT_SIZE_MIN = 8;
+      const FONT_SIZE_MAX = 19;
+
+      // Phase durations (milliseconds)
+      const PHASE = {
+        STORM  : 2400,    // chaotic drift & swirl
+        GATHER : 2500,    // letters converge to form JARIF
+        HOLD   : 2100,    // word fully visible, gentle pulse
+        SCATTER: 2100     // explosive burst
+      };
+
+      // global state
+      let particles = [];
+      let targetPositions = [];   // array of {x, y} screen coordinates matching glyph density of "JARIF"
+      let phase = 'STORM';
+      let phaseStart = performance.now();
+      let animId = null;
+
+      // helper functions
+      function rand(min, max) { return min + Math.random() * (max - min); }
+      function lerp(a, b, t) { return a + (b - a) * t; }
+      function clamp(val, min, max) { return Math.min(max, Math.max(min, val)); }
+      function easeInOutCubic(t) { return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; }
+      function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+      function easeInCubic(t) { return t * t * t; }
+
+      function randomLetter() {
+        return ALPHABET[Math.floor(Math.random() * ALPHABET.length)];
+      }
+
+      // ----- build target positions based on rendered "JARIF" (dynamic per canvas size) -----
+      function rebuildTargetPositions() {
+        if (!canvas || canvas.width === 0 || canvas.height === 0) return;
+        
+        const offscreen = document.createElement('canvas');
+        offscreen.width = canvas.width;
+        offscreen.height = canvas.height;
+        const oc = offscreen.getContext('2d');
+        
+        // adaptive font size: fits nicely across screens, with generous but readable size
+        let fontSize = Math.min(canvas.width / WORD.length * 1.2, canvas.height * 0.32, 170);
+        fontSize = clamp(fontSize, 42, 190);
+        oc.font = `900 ${fontSize}px 'Courier New', monospace`;
+        oc.textAlign = 'center';
+        oc.textBaseline = 'middle';
+        oc.fillStyle = '#fff';
+        // center the word JARIF elegantly
+        oc.fillText(WORD, canvas.width / 2, canvas.height / 2);
+        
+        const imageData = oc.getImageData(0, 0, canvas.width, canvas.height);
+        const data = imageData.data;
+        // sample density: step size 5 -> good density for ~400-500 particles
+        const step = 5;   
+        const positions = [];
+        
+        for (let y = 0; y < canvas.height; y += step) {
+          for (let x = 0; x < canvas.width; x += step) {
+            const idx = (y * canvas.width + x) * 4;
+            if (data[idx + 3] > 128) {  // opaque pixel (part of the letter shape)
+              positions.push({ x: x + (Math.random() - 0.5) * 1.2, y: y + (Math.random() - 0.5) * 1.2 }); // slight sub-pixel jitter for organic look
+            }
+          }
+        }
+        
+        // if for some reason positions are too few (small canvas fallback), add artificial points
+        if (positions.length < 80) {
+          // fallback: generate points around center in word pattern
+          const centerX = canvas.width / 2;
+          const centerY = canvas.height / 2;
+          const charOffsets = [-1.6, -0.5, 0.5, 1.4, 2.3]; // rough spread for J A R I F
+          for (let i = 0; i < NUM_PARTICLES; i++) {
+            const offsetX = (Math.random() - 0.5) * 120;
+            const offsetY = (Math.random() - 0.5) * 70;
+            positions.push({ x: centerX + offsetX, y: centerY + offsetY });
+          }
+        }
+        
+        // shuffle positions so particle assignment appears organic
+        for (let i = positions.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [positions[i], positions[j]] = [positions[j], positions[i]];
+        }
+        
+        targetPositions = positions;
+      }
+      
+      // expose rebuild for resize event
+      window._targetPositionsRebuild = rebuildTargetPositions;
+      const initTargetPositions = rebuildTargetPositions; // alias
+
+      // ---------- Particle Class ----------
+      class Particle {
+        constructor(index) {
+          this.index = index;
+          this.reset();
+          // initial random positions across canvas
+          this.x = rand(0, canvas.width);
+          this.y = rand(0, canvas.height);
+          this.alpha = rand(0.4, 1);
+        }
+        
+        reset() {
+          this.x = rand(0, canvas.width);
+          this.y = rand(0, canvas.height);
+          this.size = rand(FONT_SIZE_MIN, FONT_SIZE_MAX);
+          this.char = randomLetter();
+          
+          // storm motion vectors
+          const angle = rand(0, Math.PI * 2);
+          const speed = rand(0.45, 2.3);
+          this.vx = Math.cos(angle) * speed;
+          this.vy = Math.sin(angle) * speed;
+          
+          // swirling orbit parameters
+          this.orbitR = rand(70, Math.min(canvas.width, canvas.height) * 0.48);
+          this.orbitAngle = rand(0, Math.PI * 2);
+          this.orbitSpeed = rand(0.0025, 0.013) * (Math.random() < 0.5 ? 1 : -1);
+          
+          // dynamic color palette: electric cyan, violet, magenta, neon blue
+          const hueChoice = Math.random();
+          let hue;
+          if (hueChoice < 0.5) hue = rand(175, 215);   // cyan/teal spectrum
+          else hue = rand(265, 315);                   // purple/magenta
+          this.hue = hue;
+          this.alpha = rand(0.4, 0.95);
+          
+          // assign to a specific target index based on particle index modulo available positions
+          const tLen = targetPositions.length;
+          this.targetIdx = (tLen > 0) ? (this.index % tLen) : 0;
+          
+          // snapshot positions for transitions
+          this.stormX = this.x;
+          this.stormY = this.y;
+          
+          // scatter burst destinations (set properly in SCATTER phase)
+          this.scatterX = rand(-canvas.width * 0.3, canvas.width * 1.3);
+          this.scatterY = rand(-canvas.height * 0.3, canvas.height * 1.3);
+          this.scatterDelay = rand(0, 0.35);
+        }
+        
+        // storm motion: swirl + drift + organic movement
+        storm(dt) {
+          // center slowly drifts for cinematic effect
+          const time = Date.now() * 0.00025;
+          const cx = canvas.width / 2 + Math.sin(time) * 45;
+          const cy = canvas.height / 2 + Math.cos(time * 0.9) * 35;
+          
+          this.orbitAngle += this.orbitSpeed;
+          
+          const orbitX = cx + Math.cos(this.orbitAngle) * this.orbitR;
+          const orbitY = cy + Math.sin(this.orbitAngle) * this.orbitR;
+          
+          // blend: linear drift + vortex pull + natural velocity
+          this.x += (orbitX - this.x) * 0.011 + this.vx * 0.38;
+          this.y += (orbitY - this.y) * 0.011 + this.vy * 0.38;
+          
+          // keep particles mostly inside safe boundaries (soft wrap effect)
+          if (this.x < -50) this.x = canvas.width + 30;
+          if (this.x > canvas.width + 50) this.x = -30;
+          if (this.y < -50) this.y = canvas.height + 30;
+          if (this.y > canvas.height + 50) this.y = -30;
+          
+          // randomly change character for liveliness
+          if (Math.random() < 0.018) this.char = randomLetter();
+          
+          // pulsing alpha during storm
+          this.alpha = lerp(this.alpha, rand(0.35, 0.9), 0.035);
+        }
+        
+        draw(overrideAlpha = null) {
+          const a = (overrideAlpha !== null) ? overrideAlpha : this.alpha;
+          ctx.globalAlpha = clamp(a, 0.05, 1);
+          ctx.fillStyle = `hsl(${this.hue}, 88%, 68%)`;
+          ctx.font = `bold ${this.size}px 'Courier New', monospace`;
+          ctx.fillText(this.char, this.x, this.y);
+        }
+      }
+      
+      // ----- initialize all particles -----
+      function initParticles() {
+        particles = [];
+        for (let i = 0; i < NUM_PARTICLES; i++) {
+          particles.push(new Particle(i));
+        }
+      }
+      
+      // reset full system
+      function fullReset() {
+        rebuildTargetPositions();   // re-sample "JARIF" positions
+        initParticles();
+        phase = 'STORM';
+        phaseStart = performance.now();
+        // snapshot storm positions again for gather
+        particles.forEach(p => {
+          p.stormX = p.x;
+          p.stormY = p.y;
+        });
+      }
+      
+      // ----- animation loop with dynamic phase timing -----
+      let lastTimestamp = performance.now();
+      
+      function animate(now) {
+        animId = requestAnimationFrame(animate);
+        const dt = Math.min(50, now - lastTimestamp);
+        lastTimestamp = now;
+        const elapsed = now - phaseStart;
+        
+        // --- Background: trailing black with subtle fade (motion blur effect) ---
+        ctx.globalAlpha = 0.22;
+        ctx.fillStyle = '#010101';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.globalAlpha = 1.0;
+        
+        // ========== PHASE MACHINE ==========
+        if (phase === 'STORM') {
+          particles.forEach(p => {
+            p.storm(dt);
+            p.draw();
+          });
+          
+          if (elapsed >= PHASE.STORM) {
+            // snapshot current positions for smooth morph to JARIF
+            particles.forEach(p => {
+              p.stormX = p.x;
+              p.stormY = p.y;
+              p.char = randomLetter();   // randomize before morph
+            });
+            phase = 'GATHER';
+            phaseStart = now;
+          }
+        } 
+        else if (phase === 'GATHER') {
+          const progress = Math.min(elapsed / PHASE.GATHER, 1.0);
+          const ease = easeInOutCubic(progress);
+          
+          particles.forEach(p => {
+            // keep slight storm motion underlay for liveliness
+            p.storm(dt * 0.4);
+            
+            const target = targetPositions[p.targetIdx];
+            if (!target) {
+              p.draw();
+              return;
+            }
+            
+            // interpolate from storm snapshot to final target position
+            const targetX = lerp(p.stormX, target.x, ease);
+            const targetY = lerp(p.stormY, target.y, ease);
+            
+            // dynamic convergence: accelerate toward center as progress advances
+            const convergenceStrength = 0.14 + ease * 0.65;
+            p.x = lerp(p.x, targetX, convergenceStrength);
+            p.y = lerp(p.y, targetY, convergenceStrength);
+            
+            // gradually morph letters into "JARIF" characters
+            const wordIndex = p.targetIdx % WORD.length;
+            if (progress > 0.65 && Math.random() < 0.085) {
+              p.char = WORD[wordIndex];
+            } else if (progress > 0.85 && Math.random() < 0.1) {
+              p.char = WORD[wordIndex];
+            }
+            
+            // fading into stable brightness
+            const alphaVal = lerp(p.alpha, 0.8 + ease * 0.2, 0.1);
+            p.draw(alphaVal);
+          });
+          
+          // final snap when gather completes
+          if (progress >= 1.0) {
+            particles.forEach(p => {
+              const wIdx = p.targetIdx % WORD.length;
+              p.char = WORD[wIdx];
+              // lock to perfect target positions
+              const finalTarget = targetPositions[p.targetIdx];
+              if (finalTarget) {
+                p.x = finalTarget.x;
+                p.y = finalTarget.y;
+              }
+            });
+            phase = 'HOLD';
+            phaseStart = now;
+          }
+        } 
+        else if (phase === 'HOLD') {
+          const holdT = Math.min(elapsed / PHASE.HOLD, 1.0);
+          const glowPulse = 0.82 + 0.18 * Math.sin(holdT * Math.PI * 5.2);
+          
+          particles.forEach(p => {
+            const target = targetPositions[p.targetIdx];
+            if (target) {
+              // tiny alive jitter + very light drift
+              p.x += (target.x - p.x) * 0.22 + (Math.random() - 0.5) * 0.52;
+              p.y += (target.y - p.y) * 0.22 + (Math.random() - 0.5) * 0.52;
+            }
+            // ensure letters stay as JARIF characters
+            const wIdx = p.targetIdx % WORD.length;
+            if (Math.random() < 0.02) p.char = WORD[wIdx];
+            else p.char = WORD[wIdx];
+            
+            p.draw(glowPulse);
+          });
+          
+          if (elapsed >= PHASE.HOLD) {
+            // prepare scatter: store current positions as scatter origin, compute explosion vectors
+            particles.forEach(p => {
+              p.stormX = p.x;
+              p.stormY = p.y;
+              const angleExplode = rand(0, Math.PI * 2);
+              const distance = rand(canvas.width * 0.6, canvas.width * 1.3);
+              p.scatterX = canvas.width / 2 + Math.cos(angleExplode) * distance;
+              p.scatterY = canvas.height / 2 + Math.sin(angleExplode) * distance;
+              p.scatterDelay = rand(0, 0.32);
+              // also randomize letters during explosion
+            });
+            phase = 'SCATTER';
+            phaseStart = now;
+          }
+        } 
+        else if (phase === 'SCATTER') {
+          const scatterProgress = Math.min(elapsed / PHASE.SCATTER, 1.0);
+          
+          particles.forEach(p => {
+            const localDelay = p.scatterDelay;
+            let t = (scatterProgress - localDelay) / (1.0 - localDelay);
+            t = clamp(t, 0, 1);
+            const easeOut = easeOutCubic(t);
+            
+            p.x = lerp(p.stormX, p.scatterX, easeOut);
+            p.y = lerp(p.stormY, p.scatterY, easeOut);
+            
+            // letter randomness gradually increases
+            if (Math.random() < 0.045) p.char = randomLetter();
+            
+            // fade out alpha based on explosion progress
+            const finalAlpha = lerp(1.0, 0.0, easeOut);
+            p.draw(finalAlpha);
+          });
+          
+          if (scatterProgress >= 1.0) {
+            // reset all particles for new cycle
+            particles.forEach(p => {
+              p.reset();
+              // spawn from edges for dramatic re-entry
+              const edge = Math.floor(Math.random() * 4);
+              switch(edge) {
+                case 0: p.x = rand(0, canvas.width); p.y = -40; break;
+                case 1: p.x = canvas.width + 40; p.y = rand(0, canvas.height); break;
+                case 2: p.x = rand(0, canvas.width); p.y = canvas.height + 40; break;
+                default: p.x = -40; p.y = rand(0, canvas.height); break;
+              }
+              p.stormX = p.x;
+              p.stormY = p.y;
+            });
+            phase = 'STORM';
+            phaseStart = now;
+          }
+        }
+        
+        // --- overlay glow effect: magical aura during gather & hold (enhances JARIF reveal) ---
+        if (phase === 'GATHER' || phase === 'HOLD') {
+          let intensity = 0;
+          if (phase === 'GATHER') {
+            const gatherT = Math.min((performance.now() - phaseStart) / PHASE.GATHER, 1);
+            intensity = easeOutCubic(gatherT) * 0.22;
+          } else {
+            const holdT = Math.min((performance.now() - phaseStart) / PHASE.HOLD, 1);
+            intensity = 0.18 + Math.sin(holdT * Math.PI * 3) * 0.06;
+          }
+          const radGrd = ctx.createRadialGradient(
+            canvas.width / 2, canvas.height / 2, 15,
+            canvas.width / 2, canvas.height / 2, Math.min(canvas.width, canvas.height) * 0.46
+          );
+          radGrd.addColorStop(0, `rgba(130, 70, 255, ${intensity * 1.2})`);
+          radGrd.addColorStop(0.5, `rgba(40, 170, 255, ${intensity * 0.6})`);
+          radGrd.addColorStop(1, 'rgba(0,0,0,0)');
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = radGrd;
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+        }
+        
+        // small particle sparkles when HOLD phase (adds magic)
+        if (phase === 'HOLD') {
+          ctx.globalAlpha = 0.4;
+          for (let i = 0; i < 8; i++) {
+            if (Math.random() < 0.2) {
+              const randPart = particles[Math.floor(Math.random() * particles.length)];
+              if (randPart) {
+                ctx.fillStyle = `hsl(${randPart.hue}, 95%, 72%)`;
+                ctx.font = `bold ${randPart.size * 0.7}px monospace`;
+                ctx.fillText('✦', randPart.x + (Math.random() - 0.5) * 12, randPart.y + (Math.random() - 0.5) * 12);
+              }
+            }
+          }
+        }
+      }
+      
+      // ---------- handle orientation and start ----------
+      function bootstrap() {
+        resizeCanvas();
+        rebuildTargetPositions();
+        initParticles();
+        // additional safety: reassign target indices after rebuild
+        particles.forEach((p, idx) => {
+          const tLen = targetPositions.length;
+          p.targetIdx = tLen ? idx % tLen : 0;
+          p.stormX = p.x;
+          p.stormY = p.y;
+        });
+        phase = 'STORM';
+        phaseStart = performance.now();
+        lastTimestamp = performance.now();
+        if (animId) cancelAnimationFrame(animId);
+        animId = requestAnimationFrame(animate);
+      }
+      
+      // run after everything ready
+      bootstrap();
+      
+      // re-run rebuild on resize for accurate JARIF sampling
+      window.addEventListener('resize', () => {
+        rebuildTargetPositions();
+        if (particles) {
+          particles.forEach((p, idx) => {
+            const tLen = targetPositions.length;
+            p.targetIdx = tLen ? idx % tLen : 0;
+            // keep storm positions, but not resetting entire system – avoids harsh jumps
+          });
+          // if currently in gather/hold, snapshots might be misaligned, but not fatal; improves responsiveness.
+          if (phase === 'STORM') {
+            // reset storm positions gently
+            particles.forEach(p => {
+              if (Math.random() < 0.3) {
+                p.x = rand(0, canvas.width);
+                p.y = rand(0, canvas.height);
+              }
+            });
+          }
+        }
+      });
+    })();
+  </script>
+</body>
+</html>
